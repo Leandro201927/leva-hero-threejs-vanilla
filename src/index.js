@@ -14,6 +14,8 @@ let camera;
 let renderer;
 let mixer;
 let model;
+let sceneGroup = new THREE.Group(); // Group to hold the entire scene content for rotation
+scene.add(sceneGroup);
 let coinObject;
 let controls;
 let composer; // Postprocessing composer
@@ -22,6 +24,12 @@ let adaptiveQuality;
 let gui; // Main GUI instance
 let glassMesh; // Mesh for transparency animation
 let emissiveMeshes = []; // Meshes for emission animation
+let coinMesh; // The Coin001 mesh
+let coinAnimationState = 'initial'; // States: 'initial', 'emissive', 'glass', 'coin', 'floating'
+let coinAction; // Animation action for Coin001
+let coinFloatOffset = 0; // For sinusoidal floating
+let coinFinalPosition = null; // Store final position from animation
+let mousePos = { x: 0, y: 0 }; // Normalized mouse position (-1 to 1)
 const textureLoader = new THREE.TextureLoader();
 const bakedTexture = textureLoader.load('./assets/baked_final.jpg');
 bakedTexture.flipY = false;
@@ -237,10 +245,10 @@ function setupLighting() {
     const envMap = pmremGenerator.fromScene(environment).texture;
     
     scene.environment = envMap;
-    scene.background = new THREE.Color(0xebe8e8); // Light gray-white background
+    scene.background = new THREE.Color(0xd6d6da); // Light gray-white background
     
     // Add fog with custom configuration
-    scene.fog = new THREE.Fog(0xebe8e8, 0, 11.5);
+    scene.fog = new THREE.Fog(0xd6d6da, 0, 11.5);
     
     environment.dispose();
     pmremGenerator.dispose();
@@ -261,7 +269,7 @@ function setupFogGUI() {
         enabled: true,
         color: '#ebe8e8',
         near: 0,
-        far: 11.5
+        far: 10.3
     };
     
     fogFolder.add(fogParams, 'enabled').name('Enable Fog').onChange((value) => {
@@ -357,7 +365,7 @@ function loadModel() {
         (gltf) => {
             console.log('Model loaded successfully');
             model = gltf.scene;
-            scene.add(model);
+            sceneGroup.add(model); // Add model to the group instead of scene
             
             // Log the scene structure to help debug
             console.log('Scene structure:');
@@ -365,83 +373,236 @@ function loadModel() {
             // Create materials based on performance tier
             const isHighTier = adaptiveQuality?.config.physicalMaterial && adaptiveQuality?.config.postprocessing;
             
-            // 1. Glass Material (Cylinder008_1)
-            let glassMaterial;
-            if (isHighTier) {
-                // High Quality: Custom Glass Shader
-                glassMaterial = new THREE.ShaderMaterial({
-                    uniforms: {
-                        color: { value: new THREE.Color(0x0bbae6) },
-                        opacity: { value: 0.15 }
-                    },
-                    vertexShader: `
-                        varying vec3 vNormal;
-                        varying vec3 vViewPosition;
-                        void main() {
-                            vNormal = normalize(normalMatrix * normal);
-                            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-                            vViewPosition = -mvPosition.xyz;
-                            gl_Position = projectionMatrix * mvPosition;
-                        }
-                    `,
-                    fragmentShader: `
-                        uniform vec3 color;
-                        uniform float opacity;
-                        varying vec3 vNormal;
-                        varying vec3 vViewPosition;
-                        void main() {
-                            vec3 normal = normalize(vNormal);
-                            vec3 viewDir = normalize(vViewPosition);
-                            float fresnel = pow(1.0 - dot(normal, viewDir), 2.0); // Soft Fresnel
-                            float alpha = opacity + fresnel * 0.3;
-                            gl_FragColor = vec4(mix(color, vec3(1.0), fresnel), alpha);
-                        }
-                    `,
-                    transparent: true,
-                });
-            } else {
-                // Lower Quality: Translucent Standard Material
-                glassMaterial = new THREE.MeshStandardMaterial({
-                    color: 0x0bbae6,
-                    transparent: true,
-                    opacity: 0.15,
-                    roughness: 0.1,
-                    metalness: 0.5
-                });
-            }
+            // // 1. Glass Material (Cylinder008_1)
+            const glassMaterial = new THREE.MeshBasicMaterial({
+                color: 0x0bbae6,
+                transparent: false,
+                opacity: 0.85,
+                roughness: 0.1,
+                metalness: 0.5
+            });
+            // let glassMaterial;
+            // if (isHighTier) {
+            //     // High Quality: Custom Glass Shader
+            //     glassMaterial = new THREE.ShaderMaterial({
+            //         uniforms: {
+            //             color: { value: new THREE.Color(0x0bbae6) },
+            //             opacity: { value: 0.15 }
+            //         },
+            //         vertexShader: `
+            //             varying vec3 vNormal;
+            //             varying vec3 vViewPosition;
+            //             void main() {
+            //                 vNormal = normalize(normalMatrix * normal);
+            //                 vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+            //                 vViewPosition = -mvPosition.xyz;
+            //                 gl_Position = projectionMatrix * mvPosition;
+            //             }
+            //         `,
+            //         fragmentShader: `
+            //             uniform vec3 color;
+            //             uniform float opacity;
+            //             varying vec3 vNormal;
+            //             varying vec3 vViewPosition;
+            //             void main() {
+            //                 vec3 normal = normalize(vNormal);
+            //                 vec3 viewDir = normalize(vViewPosition);
+            //                 float fresnel = pow(1.0 - dot(normal, viewDir), 2.0); // Soft Fresnel
+            //                 float alpha = opacity + fresnel * 0.3;
+            //                 gl_FragColor = vec4(mix(color, vec3(1.0), fresnel), alpha);
+            //             }
+            //         `,
+            //         transparent: true,
+            //     });
+            // } else {
+            //     // Lower Quality: Translucent Standard Material
+            //     glassMaterial = new THREE.MeshStandardMaterial({
+            //         color: 0x0bbae6,
+            //         transparent: true,
+            //         opacity: 0.15,
+            //         roughness: 0.1,
+            //         metalness: 0.5
+            //     });
+            // }
 
             // 2. Emissive Material (Curves)
             const emissiveMaterial = new THREE.MeshStandardMaterial({
                 color: 0x000000, // Base color dark
                 emissive: 0x0bbae6,
-                emissiveIntensity: 1,
-                roughness: 0.3,
+                emissiveIntensity: 1.1,
+                roughness: 1,
                 metalness: 0.8
             });
 
-            model.traverse((child) => {
-                if (child.isMesh) {
-                    console.log('Object:', child.name, '| Material:', child.material?.name);
+            // Apply custom material to Coin001 with JPG envMap (using standard TextureLoader)
+            const pmremGenerator = new THREE.PMREMGenerator(renderer);
+            pmremGenerator.compileEquirectangularShader();
+
+            let coinMaterial;
+
+            new THREE.TextureLoader().load('./assets/gradiente-white-blue-fucsia.jpg', (texture) => {
+                console.log('🌈 JPG loaded for Coin envMap');
+                texture.colorSpace = THREE.SRGBColorSpace;
+                const envMap = pmremGenerator.fromEquirectangular(texture).texture;
+                
+                // Using MeshStandardMaterial to support roughness as requested
+                coinMaterial = new THREE.MeshStandardMaterial({
+                    color: 0xffffff,
+                    envMap: envMap,
+                    envMapIntensity: 1.5,
+                    roughness: 0.056, // User requested
+                    metalness: 0.361    // User requested
+                });
+                
+                // --- CUSTOM SHADER INJECTION FOR ENV MAP ROTATION ---
+                
+                // Define custom uniform for rotation
+                const customUniforms = {
+                    uEnvRotX: { value: 0 },
+                    uEnvRotY: { value: Math.PI / 2 }, // Initial 90 degrees
+                    uEnvRotZ: { value: 271.44 }
+                };
+                
+                coinMaterial.onBeforeCompile = (shader) => {
+                    // Link uniforms
+                    shader.uniforms.uEnvRotX = customUniforms.uEnvRotX;
+                    shader.uniforms.uEnvRotY = customUniforms.uEnvRotY;
+                    shader.uniforms.uEnvRotZ = customUniforms.uEnvRotZ;
                     
-                    if (child.name === 'Cylinder008_2' && child.material?.name === 'Material.003') {
-                        console.log(`💎 Aplicando material de VIDRIO a: ${child.name}`);
-                        child.material = glassMaterial;
-                        glassMesh = child;
-                    } 
-                    else if (
-                        (child.name === 'Curve002' && child.material?.name === 'Material.003') ||
-                        (child.name === 'Curve001' && child.material?.name === 'Material.004') ||
-                        (child.name === 'Cylinder008_1' && child.material?.name === 'Material.005')
-                    ) {
-                        console.log(`✨ Aplicando material EMISIVO a: ${child.name}`);
-                        child.material = emissiveMaterial;
-                        emissiveMeshes.push(child);
-                    } 
-                    else {
-                        // Apply baked texture to all other meshes
-                        child.material = new THREE.MeshBasicMaterial({ map: bakedTexture });
+                    // Inject uniform definition safely
+                    shader.fragmentShader = shader.fragmentShader.replace(
+                        '#include <common>',
+                        '#include <common>\nuniform float uEnvRotX;\nuniform float uEnvRotY;\nuniform float uEnvRotZ;'
+                    );
+                    
+                    // Inject rotation logic into getIBLRadiance function
+                    // We use the content of envmap_physical_pars_fragment and modify it
+                    if (THREE.ShaderChunk.envmap_physical_pars_fragment) {
+                        // Use Regex to be robust against spacing differences
+                        const pattern = /vec3\s+reflectVec\s*=\s*reflect\s*\(\s*-\s*viewDir\s*,\s*normal\s*\)\s*;/;
+                        
+                        const replacement = `vec3 reflectVec = reflect( - viewDir, normal );
+                                
+                                // Manual Rotation Logic (XYZ Order)
+                                float rX = uEnvRotX;
+                                float rY = uEnvRotY;
+                                float rZ = uEnvRotZ;
+                                
+                                float cx = cos(rX); float sx = sin(rX);
+                                float cy = cos(rY); float sy = sin(rY);
+                                float cz = cos(rZ); float sz = sin(rZ);
+                                
+                                mat3 rotX = mat3(
+                                    1.0, 0.0, 0.0,
+                                    0.0, cx, sx,
+                                    0.0, -sx, cx
+                                );
+                                
+                                mat3 rotY = mat3(
+                                    cy, 0.0, sy,
+                                    0.0, 1.0, 0.0,
+                                    -sy, 0.0, cy
+                                );
+                                
+                                mat3 rotZ = mat3(
+                                    cz, -sz, 0.0,
+                                    sz, cz, 0.0,
+                                    0.0, 0.0, 1.0
+                                );
+                                
+                                // Apply rotations: Z * Y * X
+                                reflectVec = rotZ * rotY * rotX * reflectVec;`;
+
+                        const modifiedChunk = THREE.ShaderChunk.envmap_physical_pars_fragment.replace(
+                            pattern,
+                            replacement
+                        );
+                        
+                        if (modifiedChunk !== THREE.ShaderChunk.envmap_physical_pars_fragment) {
+                            shader.fragmentShader = shader.fragmentShader.replace(
+                                '#include <envmap_physical_pars_fragment>',
+                                modifiedChunk
+                            );
+                        } else {
+                            console.warn('⚠️ Could not find reflectVec pattern in envmap_physical_pars_fragment. Trying fallback injection.');
+                            // Fallback: simpler injection that might work if the pattern is slightly different
+                            // Just replace the function beginning if possible, but that's risky.
+                        }
+                    } else {
+                        console.warn('Could not find envmap_physical_pars_fragment chunk');
                     }
+                    
+                    // Store reference to shader
+                    coinMaterial.userData.shader = shader;
+                };
+                
+                // Add GUI for Coin Material
+                if (gui) {
+                    // Remove existing folder if any? (Not checking but assuming clean state)
+                    const coinFolder = gui.addFolder('Coin Material');
+                    
+                    const coinParams = {
+                        envMapRotX: 0,
+                        envMapRotY: 90,
+                        envMapRotZ: 280.44,
+                        roughness: 0.312,
+                        metalness: 0.361
+                    };
+
+                    coinFolder.add(coinParams, 'envMapRotX', 0, 360).name('Env Rotation X').onChange((value) => {
+                        customUniforms.uEnvRotX.value = THREE.MathUtils.degToRad(value);
+                    });
+
+                    coinFolder.add(coinParams, 'envMapRotY', 0, 360).name('Env Rotation Y').onChange((value) => {
+                        customUniforms.uEnvRotY.value = THREE.MathUtils.degToRad(value);
+                    });
+
+                    coinFolder.add(coinParams, 'envMapRotZ', 0, 360).name('Env Rotation Z').onChange((value) => {
+                        customUniforms.uEnvRotZ.value = THREE.MathUtils.degToRad(value);
+                    });
+
+                    coinFolder.add(coinParams, 'roughness', 0, 1).name('Roughness').onChange((value) => {
+                        coinMesh.material.roughness = value;
+                    });
+
+                    coinFolder.add(coinParams, 'metalness', 0, 1).name('Metalness').onChange((value) => {
+                        coinMesh.material.metalness = value;
+                    });
+                    
+                    coinFolder.open();
                 }
+
+                model.traverse((child) => {
+                    if (child.isMesh) {
+                        console.log('Object:', child.name, '| Material:', child.material?.name);
+                        
+                        if (child.name === 'Cylinder008_2' && child.material?.name === 'Material.003') {
+                            console.log(`💎 Aplicando material de VIDRIO a: ${child.name}`);
+                            child.material = glassMaterial;
+                            // glassMesh = child;
+                            child.material = coinMaterial;
+                        } 
+                        else if (
+                            (child.name === 'Curve002' && child.material?.name === 'Material.003') ||
+                            (child.name === 'Curve001' && child.material?.name === 'Material.004') ||
+                            (child.name === 'Cylinder008_1' && child.material?.name === 'Material.005')
+                        ) {
+                            // console.log(`✨ Aplicando material EMISIVO a: ${child.name}`);
+                            // child.material = emissiveMaterial;
+                            // emissiveMeshes.push(child);
+                            child.material = coinMaterial;
+                        } 
+                        else {
+                            // Apply baked texture to all other meshes
+                            child.material = new THREE.MeshBasicMaterial({ map: bakedTexture });
+                        }
+                    }
+                });
+                
+                texture.dispose();
+                pmremGenerator.dispose();
+            }, undefined, (err) => {
+                console.error('Error loading EXR:', err);
             });
             
             // Find and use camera from the model
@@ -532,69 +693,41 @@ function loadModel() {
             
             // Log camera position/rotation when controls change
             controls.addEventListener('change', () => {
-                console.log('📷 Camera Position:', {
-                    position: {
-                        x: camera.position.x.toFixed(3),
-                        y: camera.position.y.toFixed(3),
-                        z: camera.position.z.toFixed(3)
-                    },
-                    rotation: {
-                        x: camera.rotation.x.toFixed(3),
-                        y: camera.rotation.y.toFixed(3),
-                        z: camera.rotation.z.toFixed(3)
-                    },
-                    target: {
-                        x: controls.target.x.toFixed(3),
-                        y: controls.target.y.toFixed(3),
-                        z: controls.target.z.toFixed(3)
-                    },
-                    zoom: camera.zoom.toFixed(3)
-                });
+                // console.log('📷 Camera Position:', {
+                //     position: {
+                //         x: camera.position.x.toFixed(3),
+                //         y: camera.position.y.toFixed(3),
+                //         z: camera.position.z.toFixed(3)
+                //     },
+                //     rotation: {
+                //         x: camera.rotation.x.toFixed(3),
+                //         y: camera.rotation.y.toFixed(3),
+                //         z: camera.rotation.z.toFixed(3)
+                //     },
+                //     target: {
+                //         x: controls.target.x.toFixed(3),
+                //         y: controls.target.y.toFixed(3),
+                //         z: controls.target.z.toFixed(3)
+                //     },
+                //     zoom: camera.zoom.toFixed(3)
+                // });
             });
             
-            // Find the Coin object and setup animation
-            coinObject = model.getObjectByName('Coin');
-            if (coinObject) {
-                console.log('Coin object found:', coinObject.name);
-            } else {
-                console.warn('Coin object not found in the model');
-            }
-            
-            // Setup animations
-            /*
+            // Setup animations mixer
             if (gltf.animations && gltf.animations.length > 0) {
                 mixer = new THREE.AnimationMixer(model);
+                console.log(`Found ${gltf.animations.length} animation(s) in the model`);
                 
-                // Find animation related to Coin or play all animations
+                // Log all animations for debugging
                 gltf.animations.forEach((clip, index) => {
                     console.log(`Animation ${index}:`, clip.name, '| Duration:', clip.duration);
-                    
-                    // Check if this animation affects the Coin object
-                    const isCoinAnimation = clip.tracks.some(track => 
-                        track.name.includes('Coin')
-                    );
-                    
-                    if (isCoinAnimation || gltf.animations.length === 1) {
-                        const action = mixer.clipAction(clip);
-                        action.setLoop(THREE.LoopRepeat, Infinity);
-                        action.play();
-                        console.log('Playing animation:', clip.name);
-                    }
                 });
-                
-                // If no specific Coin animation found, play all animations
-                if (mixer._actions.length === 0 && gltf.animations.length > 0) {
-                    console.log('No Coin-specific animation found, playing all animations');
-                    gltf.animations.forEach(clip => {
-                        const action = mixer.clipAction(clip);
-                        action.setLoop(THREE.LoopRepeat, Infinity);
-                        action.play();
-                    });
-                }
             } else {
                 console.warn('No animations found in the model');
             }
-            */
+            
+            // Setup coordinated Coin001 animation sequence
+            setupCoin(gltf);
             
             // Setup postprocessing if enabled (after camera is ready)
             if (adaptiveQuality?.config.postprocessing) {
@@ -620,6 +753,354 @@ function loadModel() {
             `;
         }
     );
+}
+
+// Setup coordinated Coin animation sequence
+function setupCoin(gltf) {
+    // Find Coin001 mesh
+    if (!model) {
+        console.warn('Model not loaded yet, cannot setup coin');
+        return;
+    }
+    
+    coinMesh = model.getObjectByName('Coin001');
+    if (!coinMesh) {
+        console.warn('Coin001 mesh not found in the model');
+        return;
+    }
+    
+    console.log('🪙 Coin001 found, setting up coordinated animation sequence');
+
+    // Apply custom material to Coin001 with JPG envMap (using standard TextureLoader)
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    pmremGenerator.compileEquirectangularShader();
+
+    new THREE.TextureLoader().load('./assets/gradiente-white-blue-fucsia.jpg', (texture) => {
+        console.log('🌈 JPG loaded for Coin envMap');
+        texture.colorSpace = THREE.SRGBColorSpace;
+        const envMap = pmremGenerator.fromEquirectangular(texture).texture;
+        
+        // Using MeshStandardMaterial to support roughness as requested
+        const coinMaterial = new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            envMap: envMap,
+            envMapIntensity: 1.5,
+            roughness: 0.056, // User requested
+            metalness: 0.361    // User requested
+        });
+        
+        // --- CUSTOM SHADER INJECTION FOR ENV MAP ROTATION ---
+        
+        // Define custom uniform for rotation
+        const customUniforms = {
+            uEnvRotX: { value: 0 },
+            uEnvRotY: { value: Math.PI / 2 }, // Initial 90 degrees
+            uEnvRotZ: { value: 271.44 }
+        };
+        
+        coinMaterial.onBeforeCompile = (shader) => {
+            // Link uniforms
+            shader.uniforms.uEnvRotX = customUniforms.uEnvRotX;
+            shader.uniforms.uEnvRotY = customUniforms.uEnvRotY;
+            shader.uniforms.uEnvRotZ = customUniforms.uEnvRotZ;
+            
+            // Inject uniform definition safely
+            shader.fragmentShader = shader.fragmentShader.replace(
+                '#include <common>',
+                '#include <common>\nuniform float uEnvRotX;\nuniform float uEnvRotY;\nuniform float uEnvRotZ;'
+            );
+            
+            // Inject rotation logic into getIBLRadiance function
+            // We use the content of envmap_physical_pars_fragment and modify it
+            if (THREE.ShaderChunk.envmap_physical_pars_fragment) {
+                // Use Regex to be robust against spacing differences
+                const pattern = /vec3\s+reflectVec\s*=\s*reflect\s*\(\s*-\s*viewDir\s*,\s*normal\s*\)\s*;/;
+                
+                const replacement = `vec3 reflectVec = reflect( - viewDir, normal );
+                        
+                        // Manual Rotation Logic (XYZ Order)
+                        float rX = uEnvRotX;
+                        float rY = uEnvRotY;
+                        float rZ = uEnvRotZ;
+                        
+                        float cx = cos(rX); float sx = sin(rX);
+                        float cy = cos(rY); float sy = sin(rY);
+                        float cz = cos(rZ); float sz = sin(rZ);
+                        
+                        mat3 rotX = mat3(
+                            1.0, 0.0, 0.0,
+                            0.0, cx, sx,
+                            0.0, -sx, cx
+                        );
+                        
+                        mat3 rotY = mat3(
+                            cy, 0.0, sy,
+                            0.0, 1.0, 0.0,
+                            -sy, 0.0, cy
+                        );
+                        
+                        mat3 rotZ = mat3(
+                            cz, -sz, 0.0,
+                            sz, cz, 0.0,
+                            0.0, 0.0, 1.0
+                        );
+                        
+                        // Apply rotations: Z * Y * X
+                        reflectVec = rotZ * rotY * rotX * reflectVec;`;
+
+                const modifiedChunk = THREE.ShaderChunk.envmap_physical_pars_fragment.replace(
+                    pattern,
+                    replacement
+                );
+                
+                if (modifiedChunk !== THREE.ShaderChunk.envmap_physical_pars_fragment) {
+                    shader.fragmentShader = shader.fragmentShader.replace(
+                        '#include <envmap_physical_pars_fragment>',
+                        modifiedChunk
+                    );
+                } else {
+                    console.warn('⚠️ Could not find reflectVec pattern in envmap_physical_pars_fragment. Trying fallback injection.');
+                    // Fallback: simpler injection that might work if the pattern is slightly different
+                    // Just replace the function beginning if possible, but that's risky.
+                }
+            } else {
+                console.warn('Could not find envmap_physical_pars_fragment chunk');
+            }
+            
+            // Store reference to shader
+            coinMaterial.userData.shader = shader;
+        };
+        
+        coinMesh.material = coinMaterial;
+
+        // Add GUI for Coin Material
+        if (gui) {
+            // Remove existing folder if any? (Not checking but assuming clean state)
+            const coinFolder = gui.addFolder('Coin Material');
+            
+            const coinParams = {
+                envMapRotX: 0,
+                envMapRotY: 90,
+                envMapRotZ: 280.44,
+                roughness: 0.312,
+                metalness: 0.361
+            };
+
+            coinFolder.add(coinParams, 'envMapRotX', 0, 360).name('Env Rotation X').onChange((value) => {
+                customUniforms.uEnvRotX.value = THREE.MathUtils.degToRad(value);
+            });
+
+            coinFolder.add(coinParams, 'envMapRotY', 0, 360).name('Env Rotation Y').onChange((value) => {
+                customUniforms.uEnvRotY.value = THREE.MathUtils.degToRad(value);
+            });
+
+            coinFolder.add(coinParams, 'envMapRotZ', 0, 360).name('Env Rotation Z').onChange((value) => {
+                customUniforms.uEnvRotZ.value = THREE.MathUtils.degToRad(value);
+            });
+
+            coinFolder.add(coinParams, 'roughness', 0, 1).name('Roughness').onChange((value) => {
+                coinMesh.material.roughness = value;
+            });
+
+            coinFolder.add(coinParams, 'metalness', 0, 1).name('Metalness').onChange((value) => {
+                coinMesh.material.metalness = value;
+            });
+            
+            coinFolder.open();
+        }
+        
+        texture.dispose();
+        pmremGenerator.dispose();
+    }, undefined, (err) => {
+        console.error('Error loading EXR:', err);
+    });
+    
+    // 1.a. Set initial state: emissiveIntensity at minimum (0.85), glass at max transparency (85%)
+    emissiveMeshes.forEach(mesh => {
+        if (mesh.material.emissiveIntensity !== undefined) {
+            mesh.material.emissiveIntensity = 1;
+        }
+    });
+    
+    // if (glassMesh) {
+    //     if (glassMesh.material.uniforms) {
+    //         glassMesh.material.uniforms.opacity.value = 0.85;
+    //     } else {
+    //         glassMesh.material.opacity = 0.85;
+    //     }
+    // }
+    
+    coinAnimationState = 'initial';
+    
+    // Find the coin animation from gltf.animations
+    if (gltf && gltf.animations && gltf.animations.length > 0) {
+        // Search through all animation clips
+        const coinClip = gltf.animations.find(clip => {
+            // Check if clip name contains 'Coin' or if any track targets Coin001
+            const nameMatch = clip.name.toLowerCase().includes('coin');
+            const trackMatch = clip.tracks.some(track => 
+                track.name.includes('Coin001') || track.name.includes('Coin.001')
+            );
+            return nameMatch || trackMatch;
+        });
+        
+        if (coinClip && mixer) {
+            coinAction = mixer.clipAction(coinClip);
+            coinAction.setLoop(THREE.LoopOnce, 1);
+            coinAction.clampWhenFinished = true;
+            coinAction.stop(); // Don't play yet
+            console.log('🪙 Coin animation found:', coinClip.name);
+        } else {
+            console.warn('Coin animation not found. Available clips:', gltf.animations.map(c => c.name));
+        }
+    }
+    
+    // 1.b. Start emissive ease-in after a delay (1 second)
+    setTimeout(() => {
+        startEmissiveEaseIn();
+    }, 1000);
+}
+
+// 1.b. Ease-in: Increase emissive intensity from 0.85 to 2 over 500ms
+function startEmissiveEaseIn() {
+    coinAnimationState = 'emissive';
+    console.log('🌟 Starting emissive ease-in');
+    
+    const startTime = performance.now();
+    const duration = 500;
+    const startValue = 1;
+    const endValue = 1;
+    
+    function animateEmissive() {
+        const elapsed = performance.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        
+        // Ease-in function (quadratic)
+        const easeProgress = progress * progress;
+        const currentValue = startValue + (endValue - startValue) * easeProgress;
+        
+        emissiveMeshes.forEach(mesh => {
+            if (mesh.material.emissiveIntensity !== undefined) {
+                mesh.material.emissiveIntensity = currentValue;
+            }
+        });
+        
+        if (progress < 1) {
+            requestAnimationFrame(animateEmissive);
+        } else {
+            console.log('✅ Emissive ease-in complete');
+            // 1.c. Start glass transparency ease-in
+            startGlassEaseIn();
+        }
+    }
+    
+    animateEmissive();
+}
+
+// 1.c. Ease-in: Decrease glass transparency from 85% to 15% over 500ms
+function startGlassEaseIn() {
+    coinAnimationState = 'glass';
+    console.log('💎 Starting glass transparency ease-in');
+    
+    if (!glassMesh) {
+        console.warn('Glass mesh not found, skipping to coin animation');
+        startCoinAnimation();
+        return;
+    }
+    
+    const startTime = performance.now();
+    const duration = 500;
+    const startValue = 0.85;
+    const endValue = 0.5;
+    
+    function animateGlass() {
+        const elapsed = performance.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        
+        // Ease-in function (quadratic)
+        const easeProgress = progress * progress;
+        const currentValue = startValue + (endValue - startValue) * easeProgress;
+        
+        if (glassMesh.material.uniforms) {
+            glassMesh.material.uniforms.opacity.value = currentValue;
+        } else {
+            glassMesh.material.opacity = currentValue;
+        }
+        
+        if (progress < 1) {
+            requestAnimationFrame(animateGlass);
+        } else {
+            console.log('✅ Glass transparency ease-in complete');
+            // 1.d. Start coin animation
+            startCoinAnimation();
+        }
+    }
+    
+    animateGlass();
+}
+
+// 1.d. Play Coin001 animation once
+function startCoinAnimation() {
+    coinAnimationState = 'coin';
+    console.log('🪙 Starting Coin001 animation (once)');
+    
+    if (!coinAction) {
+        console.warn('Coin animation not available, starting floating immediately');
+        startFloatingAnimation();
+        return;
+    }
+    
+    // Play animation from the start
+    coinAction.reset();
+    coinAction.play();
+    
+    // Listen for when the animation finishes
+    mixer.addEventListener('finished', onCoinAnimationFinished);
+}
+
+// 1.e. Handle coin animation finish, capture final position
+function onCoinAnimationFinished(event) {
+    if (event.action === coinAction) {
+        console.log('✅ Coin001 animation finished');
+        
+        // Remove listener to avoid multiple calls
+        mixer.removeEventListener('finished', onCoinAnimationFinished);
+        
+        // 1.e. Store the final position of the coin
+        if (coinMesh) {
+            coinFinalPosition = {
+                x: coinMesh.position.x,
+                y: coinMesh.position.y,
+                z: coinMesh.position.z
+            };
+            console.log('📍 Final coin position captured:', coinFinalPosition);
+        }
+        
+        // 1.f. Start floating animation
+        startFloatingAnimation();
+    }
+}
+
+// 1.f. Floating animation with cursor-following rotation
+function startFloatingAnimation() {
+    coinAnimationState = 'floating';
+    console.log('🎈 Starting floating animation with cursor tracking');
+    
+    // If we don't have a final position, use current position
+    if (!coinFinalPosition && coinMesh) {
+        coinFinalPosition = {
+            x: coinMesh.position.x,
+            y: coinMesh.position.y,
+            z: coinMesh.position.z
+        };
+    }
+}
+
+// Mouse move listener for cursor tracking
+function onMouseMove(event) {
+    // Normalize mouse position to -1 to 1
+    mousePos.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mousePos.y = -(event.clientY / window.innerHeight) * 2 + 1;
 }
 
 // Animation loop
@@ -650,24 +1131,77 @@ function animate() {
     const cycle = (Math.sin(time * 2.0) + 1.0) / 2.0; // 0 to 1 value
     const easeInOut = cycle * cycle * (3.0 - 2.0 * cycle); // Simple cubic ease-in-out
 
-    // 1. Glass Transparency Animation (15% to 70%)
-    if (glassMesh) {
-        const targetOpacity = 0.15 + (0.70 - 0.15) * easeInOut;
-        if (glassMesh.material.uniforms) {
-            // ShaderMaterial
-            glassMesh.material.uniforms.opacity.value = targetOpacity;
-        } else {
-            // StandardMaterial
-            glassMesh.material.opacity = targetOpacity;
+    // Only run continuous animations if NOT in coordinated coin sequence (or after floating starts)
+    if (coinAnimationState === 'floating' || coinAnimationState === 'initial') {
+        // 1. Glass Transparency Animation (15% to 85%) - only if in floating state and we want it to continue
+        // For now, keep glass at 15% after sequence completes
+        if (glassMesh && coinAnimationState !== 'floating') {
+            const targetOpacity = 0.15 + (0.85 - 0.15) * easeInOut;
+            if (glassMesh.material.uniforms) {
+                // ShaderMaterial
+                glassMesh.material.uniforms.opacity.value = targetOpacity;
+            } else {
+                // StandardMaterial
+                glassMesh.material.opacity = targetOpacity;
+            }
         }
+
+        // 2. Emission Animation (Cyan on/off) - only if in floating state and we want it to continue
+        // For now, keep emission at max (2.0) after sequence completes
+        // if (coinAnimationState !== 'floating') {
+        //     emissiveMeshes.forEach(mesh => {
+        //         if (mesh.material.emissiveIntensity !== undefined) {
+        //             mesh.material.emissiveIntensity = 0.85 + (easeInOut * 1.05); // Scale intensity for better glow
+        //         }
+        //     });
+        // }
+    }
+    
+    // 1.f. Floating animation with cursor-following rotation (when in floating state)
+    if (coinAnimationState === 'floating' && coinMesh && coinFinalPosition) {
+        // Sinusoidal vertical floating (starts by going up)
+        coinFloatOffset += delta * 0.5; // Control speed of floating
+        const floatAmplitude = 0.15; // Amplitude of the float (how much it moves up/down)
+        const floatY = Math.sin(coinFloatOffset) * floatAmplitude;
+        
+        // Apply smooth ease-in-out to the sine wave
+        const rawSin = Math.sin(coinFloatOffset);
+        const smoothFloat = rawSin * rawSin * rawSin; // Cubic for smooth ease
+        const smoothY = smoothFloat * floatAmplitude;
+        
+        // Update position: base + floating offset
+        coinMesh.position.y = coinFinalPosition.y + smoothY;
+        
+        // Cursor-following rotation (rotate against cursor direction)
+        // Calculate rotation based on mouse position (inverted for "looking at cursor" effect)
+        const rotationSpeed = 0.5; // How much the coin rotates based on cursor
+        const targetRotationY = -mousePos.x * rotationSpeed;
+        const targetRotationX = mousePos.y * rotationSpeed;
+        
+        // Smooth rotation with ease-in-out
+        const rotationDamping = 5; // Lower = smoother/slower
+        coinMesh.rotation.y += (targetRotationY - coinMesh.rotation.y) * delta * rotationDamping;
+        coinMesh.rotation.x += (targetRotationX - coinMesh.rotation.x) * delta * rotationDamping;
     }
 
-    // 2. Emission Animation (Cyan on/off)
-    emissiveMeshes.forEach(mesh => {
-        if (mesh.material.emissiveIntensity !== undefined) {
-            mesh.material.emissiveIntensity = easeInOut * 2.5; // Scale intensity for better glow
-        }
-    });
+    // --- SMOOTH SCENE ROTATION BASED ON CURSOR ---
+    if (sceneGroup) {
+        // Define rotation intensity (how much the scene tilts)
+        const sceneRotationIntensityX = 0.015; // Max rotation on X axis (radians)
+        const sceneRotationIntensityY = 0.05; // Max rotation on Y axis (radians)
+        
+        // Calculate target rotation based on mouse position
+        // mousePos.x is -1 to 1, mousePos.y is -1 to 1
+        // We want the scene to rotate IN the direction of the cursor
+        const targetSceneRotY = mousePos.x * sceneRotationIntensityY;
+        const targetSceneRotX = -mousePos.y * sceneRotationIntensityX; // Invert Y because screen Y is top-down
+        
+        // Smoothly interpolate current rotation to target rotation
+        const sceneDamping = 2.0; // Lower = smoother/slower response
+        
+        sceneGroup.rotation.y += (targetSceneRotY - sceneGroup.rotation.y) * delta * sceneDamping;
+        sceneGroup.rotation.x += (targetSceneRotX - sceneGroup.rotation.x) * delta * sceneDamping;
+    }
     
     // Render the scene with or without postprocessing
     if (camera) {
@@ -712,6 +1246,7 @@ function init() {
     loadModel();
     
     window.addEventListener('resize', onWindowResize);
+    window.addEventListener('mousemove', onMouseMove);
 }
 
 // Start the application
